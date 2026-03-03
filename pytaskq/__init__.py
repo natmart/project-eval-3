@@ -8,13 +8,14 @@ task scheduling and threading for concurrent execution.
 __version__ = "2.0.0"
 __author__ = "PyTaskQ Team"
 
-from .queue import TaskQueue
+from .queue import TaskQueue, PriorityQueue
 from .task import Task, TaskStatus
 from .metrics import MetricsCollector, MetricsSnapshot
 from .retry import RetryPolicy, with_retry, RetryError
 
 __all__ = [
     "TaskQueue",
+    "PriorityQueue",
     "Task",
     "TaskStatus",
     "MetricsCollector",
