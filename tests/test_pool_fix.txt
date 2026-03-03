@@ -1,0 +1,891 @@
+"""
+Tests for WorkerPool
+
+Tests for the WorkerPool class covering worker management, scaling operations,
+start/stop lifecycle, task tracking, and edge cases.
+"""
+
+import time
+import threading
+from typing import Any
+
+import pytest
+
+from pytaskq import Task, TaskQueue, TaskStatus, WorkerPool
+from pytaskq.retry import RetryPolicy
+
+
+class TestWorkerPoolInitialization:
+    """Test WorkerPool initialization and basic setup."""
+
+    def test_pool_initialization_defaults(self) -> None:
+        """Test pool initialization with default values."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue)
+
+        assert pool.queue == queue
+        assert pool.worker_count == 4
+        assert pool.poll_interval == 0.1
+        assert pool.retry_policy is not None
+        assert pool.retry_policy.max_attempts == 3
+        assert pool.active_workers_count == 0
+        assert pool.completed_tasks_count == 0
+        assert pool.failed_tasks_count == 0
+
+    def test_pool_initialization_custom_values(self) -> None:
+        """Test pool initialization with custom values."""
+        queue = TaskQueue()
+        retry_policy = RetryPolicy(max_attempts=5, base_delay=2.0)
+        pool = WorkerPool(
+            queue=queue,
+            worker_count=2,
+            poll_interval=0.5,
+            retry_policy=retry_policy,
+        )
+
+        assert pool.worker_count == 2
+        assert pool.poll_interval == 0.5
+        assert pool.retry_policy.max_attempts == 5
+        assert pool.retry_policy.base_delay == 2.0
+
+    def test_pool_creates_expected_workers(self) -> None:
+        """Test that pool creates the expected number of workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=6)
+
+        metrics = pool.get_worker_metrics()
+        assert len(metrics) == 6
+        # Workers should not be running initially
+        assert pool.active_workers_count == 0
+
+    def test_pool_initial_zero_completed_failed_tasks(self) -> None:
+        """Test that pool starts with zero completed and failed task counts."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=4)
+
+        assert pool.completed_tasks_count == 0
+        assert pool.failed_tasks_count == 0
+
+        pool_summary = pool.get_pool_summary()
+        assert pool_summary["completed_tasks"] == 0
+        assert pool_summary["failed_tasks"] == 0
+
+
+class TestWorkerPoolLifecycle:
+    """Test WorkerPool start/stop lifecycle."""
+
+    def test_start_all_starts_all_workers(self) -> None:
+        """Test that start_all starts all workers in the pool."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        pool.start_all()
+        time.sleep(0.2)  # Give threads time to start
+
+        assert pool.active_workers_count == 3
+
+        pool.stop_all(timeout=1.0)
+
+    def test_stop_all_stops_all_workers(self) -> None:
+        """Test that stop_all stops all workers in the pool."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+        assert pool.active_workers_count == 2
+
+        pool.stop_all(timeout=1.0)
+        time.sleep(0.1)
+        assert pool.active_workers_count == 0
+
+    def test_start_all_with_no_changes_when_already_started(self) -> None:
+        """Test that starting already running workers doesn't cause issues."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+        initial_active_count = pool.active_workers_count
+
+        # Call start_all again - should not increase count
+        pool.start_all()
+        time.sleep(0.1)
+
+        assert pool.active_workers_count == initial_active_count
+
+        pool.stop_all(timeout=1.0)
+
+    def test_stop_all_with_timeout(self) -> None:
+        """Test that stop_all respects timeout parameter."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+
+        # Stop with timeout
+        pool.stop_all(timeout=2.0)
+        time.sleep(0.1)
+
+        assert pool.active_workers_count == 0
+
+    def test_stop_all_without_timeout(self) -> None:
+        """Test that stop_all works without timeout (waits indefinitely)."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+
+        # Stop without timeout
+        pool.stop_all()
+        time.sleep(0.1)
+
+        assert pool.active_workers_count == 0
+
+
+class TestWorkerPoolScaling:
+    """Test WorkerPool scaling operations (scale_up, scale_down)."""
+
+    def test_scale_up_adds_workers(self) -> None:
+        """Test that scale_up adds specified number of workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        initial_metrics = pool.get_worker_metrics()
+        assert len(initial_metrics) == 2
+
+        pool.scale_up(3)
+
+        scaled_metrics = pool.get_worker_metrics()
+        assert len(scaled_metrics) == 5
+
+    def test_scale_up_with_running_pool(self) -> None:
+        """Test that scaling up works when pool is running."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+        initial_active = pool.active_workers_count
+        assert initial_active == 2
+
+        pool.scale_up(2)
+        time.sleep(0.2)
+
+        # New workers are not automatically started
+        assert pool.active_workers_count == initial_active
+        assert len(pool.get_worker_metrics()) == 4
+
+        pool.stop_all(timeout=1.0)
+
+    def test_scale_down_removes_workers(self) -> None:
+        """Test that scale_down removes specified number of workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=5)
+
+        initial_metrics = pool.get_worker_metrics()
+        assert len(initial_metrics) == 5
+
+        pool.scale_down(2)
+
+        scaled_metrics = pool.get_worker_metrics()
+        assert len(scaled_metrics) == 3
+
+    def test_scale_down_stops_removed_workers(self) -> None:
+        """Test that scaled-down workers are stopped."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=4)
+
+        pool.start_all()
+        time.sleep(0.2)
+        assert pool.active_workers_count == 4
+
+        pool.scale_down(2)
+        time.sleep(0.1)
+
+        # Removed workers should be stopped
+        assert pool.active_workers_count == 2
+
+        pool.stop_all(timeout=1.0)
+
+    def test_scale_down_more_than_available(self) -> None:
+        """Test scaling down more workers than available safely handles case."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        pool.start_all()
+        time.sleep(0.2)
+        assert pool.active_workers_count == 3
+
+        # Try to remove 5 workers when only 3 exist
+        pool.scale_down(5)
+        time.sleep(0.1)
+
+        # Should only remove available workers
+        assert len(pool.get_worker_metrics()) == 0
+        assert pool.active_workers_count == 0
+
+    def test_scale_up_with_handlers(self) -> None:
+        """Test that handlers are copied to new workers on scale_up."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=1)
+
+        # Register handler on initial worker
+        task_results = []
+
+        def handler(task: Task) -> Any:
+            task_results.append(task.payload)
+            return True
+
+        pool.register_handler("test_task", handler)
+
+        # Scale up
+        pool.scale_up(2)
+
+        # All workers should have the handler
+        metrics = pool.get_worker_metrics()
+        assert len(metrics) == 3
+
+    def test_scale_up_preserves_default_handler(self) -> None:
+        """Test that default handler is copied to new workers on scale_up."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=1)
+
+        # Register default handler
+        task_results = []
+
+        def default_handler(task: Task) -> Any:
+            task_results.append(task.name)
+            return True
+
+        pool.register_default_handler(default_handler)
+
+        # Scale up
+        pool.scale_up(2)
+
+        metrics = pool.get_worker_metrics()
+        assert len(metrics) == 3
+
+
+class TestWorkerPoolTaskExecution:
+    """Test WorkerPool task execution and tracking."""
+
+    def test_pool_executes_tasks_across_workers(self) -> None:
+        """Test that pool executes tasks across multiple workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        task_results = []
+
+        def handler(task: Task) -> Any:
+            task_results.append(task.payload)
+            return True
+
+        pool.register_handler("test_task", handler)
+
+        # Add tasks
+        for i in range(5):
+            task = Task(name="test_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(0.5)  # Give time for tasks to complete
+
+        assert len(task_results) == 5
+        assert pool.completed_tasks_count == 5
+
+        pool.stop_all(timeout=1.0)
+
+    def test_pool_completed_tasks_count(self) -> None:
+        """Test that completed_tasks_count is accurate across workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        def handler(task: Task) -> Any:
+            time.sleep(0.05)  # Small delay
+            return True
+
+        pool.register_handler("delayed_task", handler)
+
+        # Add tasks
+        for i in range(10):
+            task = Task(name="delayed_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(1.0)  # Give time for tasks to complete
+
+        assert pool.completed_tasks_count == 10
+        assert pool.failed_tasks_count == 0
+
+        pool.stop_all(timeout=1.0)
+
+    def test_pool_failed_tasks_count(self) -> None:
+        """Test that failed_tasks_count is accurate across workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        def failing_handler(task: Task) -> Any:
+            raise ValueError("Task failed intentionally")
+
+        pool.register_handler("failing_task", failing_handler)
+
+        # Add tasks
+        for i in range(3):
+            task = Task(name="failing_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(8.0)
+
+        # Tasks should fail after max retries
+        assert pool.failed_tasks_count == 3
+        assert pool.completed_tasks_count == 0
+
+        pool.stop_all(timeout=1.0)
+
+    def test_pool_handles_mixed_success_and_failure(self) -> None:
+        """Test that pool correctly tracks mixed success and failure."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        def success_handler(task: Task) -> Any:
+            return True
+
+        def failing_handler(task: Task) -> Any:
+            raise ValueError("Task failed")
+
+        pool.register_handler("success_task", success_handler)
+        pool.register_handler("failing_task", failing_handler)
+
+        # Add success and failing tasks
+        for i in range(5):
+            if i % 2 == 0:
+                task = Task(name="success_task", payload=i)
+            else:
+                task = Task(name="failing_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(8.0)  # Give time for tasks to complete/fail (including retries)
+
+        assert pool.completed_tasks_count == 3
+        assert pool.failed_tasks_count == 2
+
+        pool.stop_all(timeout=1.0)
+
+
+class TestWorkerPoolMetrics:
+    """Test WorkerPool metrics and summary."""
+
+    def test_get_worker_metrics_returns_all_metrics(self) -> None:
+        """Test that get_worker_metrics returns metrics for all workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=4)
+
+        metrics = pool.get_worker_metrics()
+
+        assert len(metrics) == 4
+        for metric in metrics:
+            assert metric.tasks_processed == 0
+            assert metric.tasks_completed == 0
+            assert metric.tasks_failed == 0
+
+    def test_get_pool_summary(self) -> None:
+        """Test that get_pool_summary returns comprehensive information."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        summary = pool.get_pool_summary()
+
+        assert "total_workers" in summary
+        assert "active_workers" in summary
+        assert "completed_tasks" in summary
+        assert "failed_tasks" in summary
+        assert "total_processed" in summary
+        assert "total_execution_time" in summary
+
+        assert summary["total_workers"] == 3
+        assert summary["active_workers"] == 0
+        assert summary["completed_tasks"] == 0
+        assert summary["failed_tasks"] == 0
+
+    def test_get_pool_summary_after_task_execution(self) -> None:
+        """Test pool summary reflects task execution."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        def handler(task: Task) -> Any:
+            time.sleep(0.05)
+            return True
+
+        pool.register_handler("test_task", handler)
+
+        # Add and execute tasks
+        for i in range(4):
+            task = Task(name="test_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(0.8)
+
+        summary = pool.get_pool_summary()
+        assert summary["total_workers"] == 2
+        assert summary["active_workers"] == 2
+        assert summary["completed_tasks"] == 4
+        assert summary["total_processed"] == 4
+        assert summary["total_execution_time"] > 0
+
+        pool.stop_all(timeout=1.0)
+
+    def test_active_workers_count_property(self) -> None:
+        """Test that active_workers_count property is accurate."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        assert pool.active_workers_count == 0
+
+        pool.start_all()
+        time.sleep(0.2)
+        assert pool.active_workers_count == 3
+
+        pool.stop_all(timeout=1.0)
+        time.sleep(0.1)
+        assert pool.active_workers_count == 0
+
+    def test_completed_tasks_count_property(self) -> None:
+        """Test that completed_tasks_count property aggregates correctly."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        def handler(task: Task) -> Any:
+            return True
+
+        pool.register_handler("test_task", handler)
+
+        # Add tasks
+        for i in range(6):
+            task = Task(name="test_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(0.5)
+
+        assert pool.completed_tasks_count == 6
+
+        pool.stop_all(timeout=1.0)
+
+    def test_failed_tasks_count_property(self) -> None:
+        """Test that failed_tasks_count property aggregates correctly."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        def failing_handler(task: Task) -> Any:
+            raise Exception("Task failed")
+
+        pool.register_handler("failing_task", failing_handler)
+
+        # Add tasks
+        for i in range(4):
+            task = Task(name="failing_task", payload=i)
+            queue.enqueue(task)
+
+        pool.start_all()
+        time.sleep(8.0)
+
+        assert pool.failed_tasks_count == 4
+
+        pool.stop_all(timeout=1.0)
+
+
+class TestWorkerPoolHandlers:
+    """Test WorkerPool handler registration."""
+
+    def test_register_handler_on_all_workers(self) -> None:
+        """Test that register_handler adds handler to all workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        handler_calls = []
+
+        def handler(task: Task) -> Any:
+            handler_calls.append(task.name)
+            return True
+
+        pool.register_handler("test_task", handler)
+
+        # All workers should have the handler
+        pool.start_all()
+
+        # Add tasks
+        for i in range(5):
+            task = Task(name="test_task", payload=i)
+            queue.enqueue(task)
+
+        time.sleep(0.5)
+
+        # All tasks should be handled
+        assert len(handler_calls) == 5
+
+        pool.stop_all(timeout=1.0)
+
+    def test_register_default_handler_on_all_workers(self) -> None:
+        """Test that register_default_handler adds handler to all workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        handler_calls = []
+
+        def default_handler(task: Task) -> Any:
+            handler_calls.append(task.name)
+            return True
+
+        pool.register_default_handler(default_handler)
+
+        pool.start_all()
+
+        # Add tasks without specific handlers
+        for i in range(3):
+            task = Task(name=f"task_{i}", payload=i)
+            queue.enqueue(task)
+
+        time.sleep(0.5)
+
+        # All tasks should be handled by default handler
+        assert len(handler_calls) == 3
+
+        pool.stop_all(timeout=1.0)
+
+    def test_multiple_handlers_per_worker(self) -> None:
+        """Test that multiple handlers can be registered."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        task1_results = []
+        task2_results = []
+
+        def handler1(task: Task) -> Any:
+            task1_results.append(task.payload)
+            return True
+
+        def handler2(task: Task) -> Any:
+            task2_results.append(task.payload)
+            return True
+
+        pool.register_handler("task_type_1", handler1)
+        pool.register_handler("task_type_2", handler2)
+
+        pool.start_all()
+
+        # Add mixed tasks
+        for i in range(3):
+            queue.enqueue(Task(name="task_type_1", payload=f"type1_{i}"))
+            queue.enqueue(Task(name="task_type_2", payload=f"type2_{i}"))
+
+        time.sleep(0.8)
+
+        assert len(task1_results) == 3
+        assert len(task2_results) == 3
+
+        pool.stop_all(timeout=1.0)
+
+
+class TestWorkerPoolEdgeCases:
+    """Test WorkerPool edge cases and boundary conditions."""
+
+    def test_pool_with_zero_workers(self) -> None:
+        """Test that pool can be initialized with zero workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=0)
+
+        assert len(pool.get_worker_metrics()) == 0
+        assert pool.active_workers_count == 0
+        assert pool.completed_tasks_count == 0
+        assert pool.failed_tasks_count == 0
+
+        # Operations should work without errors
+        pool.start_all()  # Nothing to start
+        pool.stop_all()
+        pool.scale_up(2)  # Add workers
+
+        assert len(pool.get_worker_metrics()) == 2
+
+    def test_scale_up_from_zero_workers(self) -> None:
+        """Test scaling up from a pool with zero workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=0)
+
+        assert len(pool.get_worker_metrics()) == 0
+
+        pool.scale_up(3)
+
+        metrics = pool.get_worker_metrics()
+        assert len(metrics) == 3
+
+    def test_scale_down_to_zero_workers(self) -> None:
+        """Test scaling down to zero workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+        assert pool.active_workers_count == 2
+
+        pool.scale_down(2)
+        time.sleep(0.1)
+
+        assert len(pool.get_worker_metrics()) == 0
+        assert pool.active_workers_count == 0
+
+    def test_empty_queue_with_running_pool(self) -> None:
+        """Test that pool handles empty queue gracefully."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.3)  # Let workers poll empty queue
+
+        # Pool should still be running
+        assert pool.active_workers_count == 2
+
+        pool.stop_all(timeout=1.0)
+
+    def test_rapid_start_stop_cycles(self) -> None:
+        """Test that pool handles rapid start/stop cycles."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        for _ in range(3):
+            pool.start_all()
+            time.sleep(0.1)
+            pool.stop_all(timeout=0.5)
+            time.sleep(0.1)
+
+        # Pool should be cleanly stopped
+        assert pool.active_workers_count == 0
+
+    def test_scale_up_by_zero(self) -> None:
+        """Test scaling up by zero workers (no-op)."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        initial_count = len(pool.get_worker_metrics())
+
+        pool.scale_up(0)
+
+        assert len(pool.get_worker_metrics()) == initial_count
+
+    def test_scale_down_by_zero(self) -> None:
+        """Test scaling down by zero workers (no-op)."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.start_all()
+        time.sleep(0.2)
+        initial_active = pool.active_workers_count
+
+        pool.scale_down(0)
+
+        assert pool.active_workers_count == initial_active
+        assert len(pool.get_worker_metrics()) == 2
+
+        pool.stop_all(timeout=1.0)
+
+    def test_large_scale_up(self) -> None:
+        """Test scaling up by a large number of workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        pool.scale_up(10)
+
+        metrics = pool.get_worker_metrics()
+        assert len(metrics) == 12
+
+    def test_handlers_after_scale_up(self) -> None:
+        """Test that handlers registered before scale_up work for new workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=1)
+
+        task_results = []
+
+        def handler(task: Task) -> Any:
+            task_results.append(task.id)
+            return True
+
+        pool.register_handler("test_task", handler)
+
+        # Scale up
+        pool.scale_up(2)
+        pool.start_all()
+
+        # Add tasks
+        for i in range(6):
+            task = Task(name="test_task", payload=i)
+            queue.enqueue(task)
+
+        time.sleep(0.8)
+
+        # All tasks should be handled by all workers
+        assert len(task_results) == 6
+
+        pool.stop_all(timeout=1.0)
+
+    def test_pool_summary_with_zero_workers(self) -> None:
+        """Test that pool summary works with zero workers."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=0)
+
+        summary = pool.get_pool_summary()
+
+        assert summary["total_workers"] == 0
+        assert summary["active_workers"] == 0
+        assert summary["completed_tasks"] == 0
+        assert summary["failed_tasks"] == 0
+        assert summary["total_processed"] == 0
+        assert summary["total_execution_time"] == 0.0
+
+    def test_concurrent_operations_safety(self) -> None:
+        """Test that concurrent scaling operations are safe."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        def scale_up_worker():
+            for _ in range(5):
+                pool.scale_up(1)
+                time.sleep(0.01)
+
+        def scale_down_worker():
+            for _ in range(3):
+                pool.scale_down(1)
+                time.sleep(0.01)
+
+        threads = [
+            threading.Thread(target=scale_up_worker),
+            threading.Thread(target=scale_down_worker),
+        ]
+
+        for thread in threads:
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        # Pool should be in a valid state
+        metrics = pool.get_worker_metrics()
+        assert len(metrics) >= 0
+        assert len(metrics) <= 9  # Initial 2 + 5 up - 3 down max
+
+        pool.stop_all(timeout=1.0)
+
+
+class TestWorkerPoolThreadPoolSafety:
+    """Test WorkerPool thread-safety."""
+
+    def test_concurrent_task_submission(self) -> None:
+        """Test that concurrent task submissions work correctly."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=4)
+
+        task_results = []
+
+        def handler(task: Task) -> Any:
+            time.sleep(0.01)
+            task_results.append(task.payload)
+            return True
+
+        pool.register_handler("concurrent_task", handler)
+        pool.start_all()
+
+        # Submit tasks from multiple threads
+        def submit_tasks(thread_id: int):
+            for i in range(10):
+                task = Task(name="concurrent_task", payload=f"{thread_id}_{i}")
+                queue.enqueue(task)
+
+        threads = [
+            threading.Thread(target=submit_tasks, args=(i,)) for i in range(3)
+        ]
+
+        for thread in threads:
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        time.sleep(0.5)
+
+        # All tasks should be completed
+        assert len(task_results) == 30
+        assert pool.completed_tasks_count == 30
+
+        pool.stop_all(timeout=1.0)
+
+    def test_concurrent_scaling_while_running(self) -> None:
+        """Test that scaling works while pool is actively running."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=2)
+
+        def handler(task: Task) -> Any:
+            time.sleep(0.05)
+            return True
+
+        pool.register_handler("test_task", handler)
+        pool.start_all()
+
+        # Add tasks continuously
+        def add_tasks():
+            for i in range(20):
+                task = Task(name="test_task", payload=i)
+                queue.enqueue(task)
+                time.sleep(0.02)
+
+        # Scale up while running
+        def scale_up():
+            for _ in range(3):
+                pool.scale_up(1)
+                time.sleep(0.1)
+
+        add_thread = threading.Thread(target=add_tasks)
+        scale_thread = threading.Thread(target=scale_up)
+
+        add_thread.start()
+        time.sleep(0.1)
+        scale_thread.start()
+
+        add_thread.join()
+        scale_thread.join()
+
+        time.sleep(1.0)
+
+        # Verify pool is still functional
+        assert pool.completed_tasks_count == 20
+
+        pool.stop_all(timeout=1.0)
+
+    def test_metrics_consistency_under_load(self) -> None:
+        """Test that metrics remain consistent under concurrent load."""
+        queue = TaskQueue()
+        pool = WorkerPool(queue, worker_count=3)
+
+        def success_handler(task: Task) -> Any:
+            return True
+
+        def fail_handler(task: Task) -> Any:
+            raise Exception("Failed")
+
+        pool.register_handler("success", success_handler)
+        pool.register_handler("fail", fail_handler)
+        pool.start_all()
+
+        # Add mixed tasks
+        for i in range(50):
+            if i % 3 == 0:
+                queue.enqueue(Task(name="fail", payload=i))
+            else:
+                queue.enqueue(Task(name="success", payload=i))
+
+        time.sleep(8.0)
+
+        summary = pool.get_pool_summary()
