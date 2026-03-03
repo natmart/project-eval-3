@@ -14,6 +14,7 @@ from .task import Task, TaskStatus
 from .metrics import MetricsCollector, MetricsSnapshot
 from .retry import RetryPolicy, with_retry, RetryError
 from .scheduler import Scheduler
+from .worker import Worker, WorkerPool, WorkerMetrics
 
 __all__ = [
     "StorageBackend",
@@ -28,5 +29,8 @@ __all__ = [
     "with_retry",
     "RetryError",
     "Scheduler",
+    "Worker",
+    "WorkerPool",
+    "WorkerMetrics",
     "__version__"
 ]
