@@ -13,6 +13,7 @@ from .queue import TaskQueue, PriorityQueue
 from .task import Task, TaskStatus
 from .metrics import MetricsCollector, MetricsSnapshot
 from .retry import RetryPolicy, with_retry, RetryError
+from .scheduler import Scheduler
 
 __all__ = [
     "StorageBackend",
@@ -26,5 +27,6 @@ __all__ = [
     "RetryPolicy",
     "with_retry",
     "RetryError",
+    "Scheduler",
     "__version__"
 ]
