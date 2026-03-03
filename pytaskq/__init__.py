@@ -9,6 +9,7 @@ __version__ = "2.0.0"
 __author__ = "PyTaskQ Team"
 
 from .queue import TaskQueue
+from .storage import StorageBackend, SQLiteBackend
 from .task import Task, TaskStatus
 
-__all__ = ["TaskQueue", "Task", "TaskStatus", "__version__"]
+__all__ = ["TaskQueue", "Task", "TaskStatus", "StorageBackend", "SQLiteBackend", "__version__"]
