@@ -12,6 +12,7 @@ from .queue import TaskQueue
 from .task import Task, TaskStatus
 from .metrics import MetricsCollector, MetricsSnapshot
 from .retry import RetryPolicy, with_retry, RetryError
+from .worker import Worker, WorkerPool
 
 __all__ = [
     "TaskQueue",
@@ -22,5 +23,7 @@ __all__ = [
     "RetryPolicy",
     "with_retry",
     "RetryError",
+    "Worker",
+    "WorkerPool",
     "__version__"
 ]
