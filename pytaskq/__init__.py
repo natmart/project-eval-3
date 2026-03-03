@@ -10,5 +10,14 @@ __author__ = "PyTaskQ Team"
 
 from .queue import TaskQueue
 from .task import Task
+from .retry import RetryPolicy, with_retry, with_retry_error, RetryError
 
-__all__ = ["TaskQueue", "Task", "__version__"]
+__all__ = [
+    "TaskQueue",
+    "Task",
+    "RetryPolicy",
+    "with_retry",
+    "with_retry_error",
+    "RetryError",
+    "__version__",
+]
