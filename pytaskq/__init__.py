@@ -13,6 +13,7 @@ from .queue import TaskQueue, PriorityQueue
 from .task import Task, TaskStatus
 from .metrics import MetricsCollector, MetricsSnapshot
 from .retry import RetryPolicy, with_retry, RetryError
+from .worker import Worker, WorkerPool, WorkerMetrics
 
 __all__ = [
     "StorageBackend",
@@ -26,5 +27,8 @@ __all__ = [
     "RetryPolicy",
     "with_retry",
     "RetryError",
+    "Worker",
+    "WorkerPool",
+    "WorkerMetrics",
     "__version__"
 ]
