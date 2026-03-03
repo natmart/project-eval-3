@@ -16,6 +16,7 @@ from .retry import RetryPolicy, with_retry, RetryError
 from .scheduler import Scheduler
 from .worker import Worker, WorkerPool, WorkerMetrics
 from .config import Config
+from .cli import create_parser, main
 
 
 def create_queue(max_size: int = 1000) -> PriorityQueue:
@@ -68,6 +69,9 @@ __all__ = [
     "MetricsSnapshot",
     # Configuration
     "Config",
+    # CLI
+    "create_parser",
+    "main",
     # Convenience functions
     "create_queue",
     # Package metadata
