@@ -10,5 +10,7 @@ __author__ = "PyTaskQ Team"
 
 from .queue import TaskQueue
 from .task import Task
+from .config import Config
+from .task import Task
 
-__all__ = ["TaskQueue", "Task", "__version__"]
+__all__ = ["TaskQueue", "Task", "Config", "__version__"]
