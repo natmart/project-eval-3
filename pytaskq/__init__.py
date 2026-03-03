@@ -10,5 +10,6 @@ __author__ = "PyTaskQ Team"
 
 from .queue import TaskQueue
 from .task import Task
+from .metrics import MetricsCollector, MetricsSnapshot
 
-__all__ = ["TaskQueue", "Task", "__version__"]
+__all__ = ["TaskQueue", "Task", "MetricsCollector", "MetricsSnapshot", "__version__"]
