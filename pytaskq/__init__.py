@@ -12,6 +12,7 @@ from .queue import TaskQueue
 from .task import Task, TaskStatus
 from .metrics import MetricsCollector, MetricsSnapshot
 from .retry import RetryPolicy, with_retry, RetryError
+from .scheduler import Scheduler, CronParser, CronValidationError
 
 __all__ = [
     "TaskQueue",
@@ -22,5 +23,8 @@ __all__ = [
     "RetryPolicy",
     "with_retry",
     "RetryError",
+    "Scheduler",
+    "CronParser",
+    "CronValidationError",
     "__version__"
 ]
