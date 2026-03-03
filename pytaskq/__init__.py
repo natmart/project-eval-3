@@ -8,7 +8,7 @@ task scheduling and threading for concurrent execution.
 __version__ = "2.0.0"
 __author__ = "PyTaskQ Team"
 
-from .queue import TaskQueue
+from .queue import TaskQueue, PriorityQueue
 from .task import Task, TaskStatus
 
-__all__ = ["TaskQueue", "Task", "TaskStatus", "__version__"]
+__all__ = ["TaskQueue", "PriorityQueue", "Task", "TaskStatus", "__version__"]
